@@ -1,0 +1,8 @@
+torch==2.0.1
+torchvision==0.15.2
+wandb==0.10.13
+attrs==20.3.0
+Pillow==8.1.0
+numpy==1.19.5
+pytorch-lightning==1.1.4
+protobuf==3.20.3

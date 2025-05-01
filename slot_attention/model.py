@@ -4,10 +4,10 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from slot_attention.utils import Tensor
-from slot_attention.utils import assert_shape
-from slot_attention.utils import build_grid
-from slot_attention.utils import conv_transpose_out_shape
+from utils import Tensor
+from utils import assert_shape
+from utils import build_grid
+from utils import conv_transpose_out_shape
 
 
 class SlotAttention(nn.Module):

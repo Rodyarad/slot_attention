@@ -3,10 +3,10 @@ import torch
 from torch import optim
 from torchvision import utils as vutils
 
-from slot_attention.model import SlotAttentionModel
-from slot_attention.params import SlotAttentionParams
-from slot_attention.utils import Tensor
-from slot_attention.utils import to_rgb_from_tensor
+from model import SlotAttentionModel
+from params import SlotAttentionParams
+from utils import Tensor
+from utils import to_rgb_from_tensor
 
 
 class SlotAttentionMethod(pl.LightningModule):

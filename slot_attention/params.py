@@ -12,7 +12,7 @@ class SlotAttentionParams:
     resolution: Tuple[int, int] = (128, 128)
     num_slots: int = 5
     num_iterations: int = 3
-    data_root: str = "/mnt/data/CLEVR_v1.0/"
+    data_root: str = "/tmp/data/CLEVR_v1.0/"
     gpus: int = 1
     max_epochs: int = 100
     num_sanity_val_steps: int = 1

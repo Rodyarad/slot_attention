@@ -5,12 +5,12 @@ from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import LearningRateMonitor
 from torchvision import transforms
 
-from slot_attention.data import CLEVRDataModule
-from slot_attention.method import SlotAttentionMethod
-from slot_attention.model import SlotAttentionModel
-from slot_attention.params import SlotAttentionParams
-from slot_attention.utils import ImageLogCallback
-from slot_attention.utils import rescale
+from data import CLEVRDataModule
+from method import SlotAttentionMethod
+from model import SlotAttentionModel
+from params import SlotAttentionParams
+from utils import ImageLogCallback
+from utils import rescale
 
 
 def main(params: Optional[SlotAttentionParams] = None):
