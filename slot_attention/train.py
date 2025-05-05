@@ -52,6 +52,7 @@ def main(params: Optional[SlotAttentionParams] = None):
         num_slots=params.num_slots,
         num_iterations=params.num_iterations,
         empty_cache=params.empty_cache,
+        vers=params.vers
     )
 
     method = SlotAttentionMethod(model=model, datamodule=clevr_datamodule, params=params)
