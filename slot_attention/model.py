@@ -95,6 +95,100 @@ class SlotAttention(nn.Module):
             assert_shape(slots.size(), (batch_size, self.num_slots, self.slot_size))
 
         return slots
+    
+
+class FocusedSlotAttention(nn.Module):
+    def __init__(self, in_features, num_iterations, num_slots, slot_size, mlp_hidden_size, epsilon=1e-8, focusing_factor=3):
+        super().__init__()
+        self.in_features = in_features
+        self.num_iterations = num_iterations
+        self.num_slots = num_slots
+        self.slot_size = slot_size  # number of hidden layers in slot dimensions
+        self.mlp_hidden_size = mlp_hidden_size
+        self.epsilon = epsilon
+        self.focusing_factor = focusing_factor
+
+        self.norm_inputs = nn.LayerNorm(self.in_features)
+        # I guess this is layer norm across each slot? should look into this
+        self.norm_slots = nn.LayerNorm(self.slot_size)
+        self.norm_mlp = nn.LayerNorm(self.slot_size)
+
+        # Linear maps for the attention module.
+        self.project_q = nn.Linear(self.slot_size, self.slot_size, bias=False)
+        self.project_k = nn.Linear(self.slot_size, self.slot_size, bias=False)
+        self.project_v = nn.Linear(self.slot_size, self.slot_size, bias=False)
+
+        self.kernel_function = nn.RELU()
+        self.scale = nn.Parameter(torch.zeros(size=(1, 1, self.slot_size)))
+
+
+        # Slot update functions.
+        self.gru = nn.GRUCell(self.slot_size, self.slot_size)
+        self.mlp = nn.Sequential(
+            nn.Linear(self.slot_size, self.mlp_hidden_size),
+            nn.ReLU(),
+            nn.Linear(self.mlp_hidden_size, self.slot_size),
+        )
+
+        self.register_buffer(
+            "slots_mu",
+            nn.init.xavier_uniform_(torch.zeros((1, 1, self.slot_size)), gain=nn.init.calculate_gain("linear")),
+        )
+        self.register_buffer(
+            "slots_log_sigma",
+            nn.init.xavier_uniform_(torch.zeros((1, 1, self.slot_size)), gain=nn.init.calculate_gain("linear")),
+        )
+
+    def forward(self, inputs: Tensor):
+        # `inputs` has shape [batch_size, num_inputs, inputs_size].
+        batch_size, num_inputs, inputs_size = inputs.shape
+        inputs = self.norm_inputs(inputs)  # Apply layer norm to the input.
+        scale = nn.Softplus()(self.scale)
+        k = self.project_k(inputs)  # Shape: [batch_size, num_inputs, slot_size].
+        k = self.kernel_function(k) + 1e-6
+        k = k / scale
+        k = k ** self.focusing_factor
+        k_norm = k.norm(dim=-1, keepdim=True)
+        k = (k / k.norm(dim=-1, keepdim=True)) * k_norm
+        assert_shape(k.size(), (batch_size, num_inputs, self.slot_size))
+        v = self.project_v(inputs)  # Shape: [batch_size, num_inputs, slot_size].
+        assert_shape(v.size(), (batch_size, num_inputs, self.slot_size))
+
+        # Initialize the slots. Shape: [batch_size, num_slots, slot_size].
+        slots_init = torch.randn((batch_size, self.num_slots, self.slot_size))
+        slots_init = slots_init.type_as(inputs)
+        slots = self.slots_mu + self.slots_log_sigma.exp() * slots_init
+
+        # Multiple rounds of attention.
+        for _ in range(self.num_iterations):
+            slots_prev = slots
+            slots = self.norm_slots(slots)
+
+            # Attention.
+            q = self.project_q(slots)  # Shape: [batch_size, num_slots, slot_size].
+            q = self.kernel_function(q) + 1e-6
+            q = q / scale
+            q_norm = q.norm(dim=-1, keepdim=True)
+            q = q ** self.focusing_factor
+            q = (q / q.norm(dim=-1, keepdim=True)) * q_norm
+            assert_shape(q.size(), (batch_size, self.num_slots, self.slot_size))
+
+            z = 1 / (q @ k.mean(dim=-2, keepdim=True).transpose(-2, -1) + 1e-6)
+            kv = (k.transpose(-2, -1) * (num_inputs ** -0.5)) @ (v * (num_inputs ** -0.5))
+            updates = q @ kv * z
+
+            # Slot update.
+            # GRU is expecting inputs of size (N,H) so flatten batch and slots dimension
+            slots = self.gru(
+                updates.view(batch_size * self.num_slots, self.slot_size),
+                slots_prev.view(batch_size * self.num_slots, self.slot_size),
+            )
+            slots = slots.view(batch_size, self.num_slots, self.slot_size)
+            assert_shape(slots.size(), (batch_size, self.num_slots, self.slot_size))
+            slots = slots + self.mlp(self.norm_mlp(slots))
+            assert_shape(slots.size(), (batch_size, self.num_slots, self.slot_size))
+
+        return slots
 
 
 class SlotAttentionModel(nn.Module):
@@ -109,6 +203,7 @@ class SlotAttentionModel(nn.Module):
         hidden_dims: Tuple[int, ...] = (64, 64, 64, 64),
         decoder_resolution: Tuple[int, int] = (8, 8),
         empty_cache=False,
+        vers='base',
     ):
         super().__init__()
         self.resolution = resolution
@@ -121,6 +216,7 @@ class SlotAttentionModel(nn.Module):
         self.hidden_dims = hidden_dims
         self.decoder_resolution = decoder_resolution
         self.out_features = self.hidden_dims[-1]
+        self.vers = vers
 
         modules = []
         channels = self.in_channels
@@ -192,13 +288,23 @@ class SlotAttentionModel(nn.Module):
         self.decoder = nn.Sequential(*modules)
         self.decoder_pos_embedding = SoftPositionEmbed(self.in_channels, self.out_features, self.decoder_resolution)
 
-        self.slot_attention = SlotAttention(
-            in_features=self.out_features,
-            num_iterations=self.num_iterations,
-            num_slots=self.num_slots,
-            slot_size=self.slot_size,
-            mlp_hidden_size=128,
-        )
+        if self.vers == 'base':
+            self.slot_attention = SlotAttention(
+                in_features=self.out_features,
+                num_iterations=self.num_iterations,
+                num_slots=self.num_slots,
+                slot_size=self.slot_size,
+                mlp_hidden_size=128,
+            )
+        else:
+                self.slot_attention = FocusedSlotAttention(
+                in_features=self.out_features,
+                num_iterations=self.num_iterations,
+                num_slots=self.num_slots,
+                slot_size=self.slot_size,
+                mlp_hidden_size=128,
+            )
+
 
     def forward(self, x):
         if self.empty_cache:
