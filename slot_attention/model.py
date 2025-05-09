@@ -118,7 +118,7 @@ class FocusedSlotAttention(nn.Module):
         self.project_k = nn.Linear(self.slot_size, self.slot_size, bias=False)
         self.project_v = nn.Linear(self.slot_size, self.slot_size, bias=False)
 
-        self.kernel_function = nn.RELU()
+        self.kernel_function = nn.ReLU()
         self.scale = nn.Parameter(torch.zeros(size=(1, 1, self.slot_size)))
 
 

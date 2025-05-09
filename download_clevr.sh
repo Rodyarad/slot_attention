@@ -2,7 +2,7 @@
 set -e
 set -x
 
-DATA_DIR=/tmp/data
+DATA_DIR=$(pwd)
 
 if [ ! -d $DATA_DIR ]; then
     mkdir $DATA_DIR
