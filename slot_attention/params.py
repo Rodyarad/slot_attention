@@ -27,4 +27,4 @@ class SlotAttentionParams:
     n_samples: int = 5
     warmup_steps_pct: float = 0.02
     decay_steps_pct: float = 0.2
-    vers: str = "focused"
+    vers: str = "focused_with_dwc"

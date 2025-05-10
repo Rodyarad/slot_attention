@@ -97,7 +97,7 @@ class SlotAttention(nn.Module):
         return slots
     
 
-class incorrFocusedSlotAttention(nn.Module):
+class FocusedSlotAttentionDWC(nn.Module):
     def __init__(self, in_features, num_iterations, num_slots, slot_size, mlp_hidden_size, epsilon=1e-8, focusing_factor=3):
         super().__init__()
         self.in_features = in_features
@@ -117,9 +117,17 @@ class incorrFocusedSlotAttention(nn.Module):
         self.project_q = nn.Linear(self.slot_size, self.slot_size, bias=False)
         self.project_k = nn.Linear(self.slot_size, self.slot_size, bias=False)
         self.project_v = nn.Linear(self.slot_size, self.slot_size, bias=False)
+        self.dwc_kernel_size = 5
 
         self.kernel_function = nn.ReLU()
         self.scale = nn.Parameter(torch.zeros(size=(1, 1, self.slot_size)))
+        self.dwc = nn.Conv2d(
+            in_channels=self.slot_size,
+            out_channels=self.slot_size,
+            kernel_size=self.dwc_kernel_size,
+            padding=self.dwc_kernel_size // 2,
+            groups=self.slot_size,
+        )
 
         # Slot update functions.
         self.gru = nn.GRUCell(self.slot_size, self.slot_size)
@@ -150,7 +158,12 @@ class incorrFocusedSlotAttention(nn.Module):
         k_norm = k.norm(dim=-1, keepdim=True)
         k = (k / k.norm(dim=-1, keepdim=True)) * k_norm
         assert_shape(k.size(), (batch_size, num_inputs, self.slot_size))
+
         v = self.project_v(inputs)  # Shape: [batch_size, num_inputs, slot_size].
+        H = W = int(num_inputs ** 0.5)
+        v_feat = v.transpose(1, 2).reshape(batch_size, self.slot_size, H, W)
+        v_local = self.dwc(v_feat)  # [B, C, H, W]
+        v = v + v_local.reshape(batch_size, self.slot_size, num_inputs).transpose(1, 2)
         assert_shape(v.size(), (batch_size, num_inputs, self.slot_size))
 
         # Initialize the slots. Shape: [batch_size, num_slots, slot_size].
@@ -172,10 +185,15 @@ class incorrFocusedSlotAttention(nn.Module):
             q = (q / q.norm(dim=-1, keepdim=True)) * q_norm
             assert_shape(q.size(), (batch_size, self.num_slots, self.slot_size))
 
-            z = 1 / (q @ k.mean(dim=-2, keepdim=True).transpose(-2, -1) + 1e-6)
-            kv = (k.transpose(-2, -1) * (num_inputs ** -0.5)) @ (v * (num_inputs ** -0.5))
-            updates = q @ kv * z
+            attn_norm_factor = self.slot_size ** -0.5
+            attn = attn_norm_factor * torch.matmul(k, q.transpose(2, 1))
+            attn = attn + self.epsilon
+            attn = attn / torch.sum(attn, dim=2, keepdim=True)
 
+            attn = attn + self.epsilon
+            attn = attn / torch.sum(attn, dim=1, keepdim=True)
+
+            updates = torch.matmul(attn.transpose(1, 2), v)
             # Slot update.
             # GRU is expecting inputs of size (N,H) so flatten batch and slots dimension
             slots = self.gru(
@@ -268,6 +286,10 @@ class FocusedSlotAttention(nn.Module):
             attn = attn_norm_factor * torch.matmul(k, q.transpose(2, 1))
             attn = attn + self.epsilon
             attn = attn / torch.sum(attn, dim=2, keepdim=True)
+
+            attn = attn + self.epsilon
+            attn = attn / torch.sum(attn, dim=1, keepdim=True)
+
             updates = torch.matmul(attn.transpose(1, 2), v)
             # `updates` has shape: [batch_size, num_slots, slot_size].
             assert_shape(updates.size(), (batch_size, self.num_slots, self.slot_size))
@@ -400,7 +422,7 @@ class SlotAttentionModel(nn.Module):
                 mlp_hidden_size=128,
             )
         else:
-                self.slot_attention = incorrFocusedSlotAttention(
+                self.slot_attention = FocusedSlotAttentionDWC(
                 in_features=self.out_features,
                 num_iterations=self.num_iterations,
                 num_slots=self.num_slots,
