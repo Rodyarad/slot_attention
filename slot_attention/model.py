@@ -164,6 +164,7 @@ class FocusedSlotAttentionDWC(nn.Module):
         v_feat = v.transpose(1, 2).reshape(batch_size, self.slot_size, H, W)
         v_local = self.dwc(v_feat)  # [B, C, H, W]
         v = v + v_local.reshape(batch_size, self.slot_size, num_inputs).transpose(1, 2)
+        #v = v_local.reshape(batch_size, self.slot_size, num_inputs).transpose(1, 2)
         assert_shape(v.size(), (batch_size, num_inputs, self.slot_size))
 
         # Initialize the slots. Shape: [batch_size, num_slots, slot_size].
