@@ -57,7 +57,7 @@ def main(params: Optional[SlotAttentionParams] = None):
 
     method = SlotAttentionMethod(model=model, datamodule=clevr_datamodule, params=params)
 
-    logger_name = "slot-attention-clevr6"
+    logger_name = "slot-attention-clevr6-" + params.vers
     logger = pl_loggers.WandbLogger(project="slot-attention-clevr6", name=logger_name)
 
     trainer = Trainer(
