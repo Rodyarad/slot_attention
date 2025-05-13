@@ -57,19 +57,22 @@ def main(params: Optional[SlotAttentionParams] = None):
 
     method = SlotAttentionMethod(model=model, datamodule=clevr_datamodule, params=params)
 
-    logger_name = "slot-attention-clevr6"
+    logger_name = "slot-attention-clevr6-favor+"
     logger = pl_loggers.WandbLogger(project="slot-attention-clevr6", name=logger_name)
 
     trainer = Trainer(
         logger=logger if params.is_logger_enabled else False,
-        accelerator="ddp" if params.gpus > 1 else None,
+        # accelerator="ddp" if params.gpus > 1 else None,
         num_sanity_val_steps=params.num_sanity_val_steps,
-        gpus=params.gpus,
+        devices=params.gpus,
+        accelerator="gpu",
+        strategy="ddp" if params.gpus > 1 else "auto",
         max_epochs=params.max_epochs,
+        accumulate_grad_batches=params.accumulate_grad_batches,
         log_every_n_steps=50,
         callbacks=[LearningRateMonitor("step"), ImageLogCallback(),] if params.is_logger_enabled else [],
     )
-    trainer.fit(method)
+    trainer.fit(method, datamodule=clevr_datamodule)
 
 
 if __name__ == "__main__":

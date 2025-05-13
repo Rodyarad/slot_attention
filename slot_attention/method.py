@@ -15,11 +15,12 @@ class SlotAttentionMethod(pl.LightningModule):
         self.model = model
         self.datamodule = datamodule
         self.params = params
+        self._val_losses: list[torch.Tensor] = []
 
     def forward(self, input: Tensor, **kwargs) -> Tensor:
         return self.model(input, **kwargs)
 
-    def training_step(self, batch, batch_idx, optimizer_idx=0):
+    def training_step(self, batch, batch_idx):
         train_loss = self.model.loss_function(batch)
         logs = {key: val.item() for key, val in train_loss.items()}
         self.log_dict(logs, sync_dist=True)
@@ -53,17 +54,30 @@ class SlotAttentionMethod(pl.LightningModule):
 
         return images
 
-    def validation_step(self, batch, batch_idx, optimizer_idx=0):
+    def validation_step(self, batch, batch_idx):
         val_loss = self.model.loss_function(batch)
+        self._val_losses.append(val_loss["loss"].detach())
         return val_loss
 
-    def validation_epoch_end(self, outputs):
-        avg_loss = torch.stack([x["loss"] for x in outputs]).mean()
-        logs = {
-            "avg_val_loss": avg_loss,
-        }
+    # def validation_epoch_end(self, outputs):
+    #     avg_loss = torch.stack([x["loss"] for x in outputs]).mean()
+    #     logs = {
+    #         "avg_val_loss": avg_loss,
+    #     }
+    #     self.log_dict(logs, sync_dist=True)
+    #     print("; ".join([f"{k}: {v.item():.6f}" for k, v in logs.items()]))
+
+    def on_validation_epoch_end(self) -> None:
+        # average all the losses you collected
+        avg_loss = torch.stack(self._val_losses).mean()
+
+        # log & print exactly as before
+        logs = {"avg_val_loss": avg_loss}
         self.log_dict(logs, sync_dist=True)
-        print("; ".join([f"{k}: {v.item():.6f}" for k, v in logs.items()]))
+        print("; ".join(f"{k}: {v.item():.6f}" for k, v in logs.items()))
+
+        # clear buffer for next epoch
+        self._val_losses.clear()
 
     def configure_optimizers(self):
         optimizer = optim.Adam(self.model.parameters(), lr=self.params.lr, weight_decay=self.params.weight_decay)
@@ -71,6 +85,12 @@ class SlotAttentionMethod(pl.LightningModule):
         warmup_steps_pct = self.params.warmup_steps_pct
         decay_steps_pct = self.params.decay_steps_pct
         total_steps = self.params.max_epochs * len(self.datamodule.train_dataloader())
+        # total_steps = (
+        #     self.params.max_epochs * (
+        #         (self.datamodule.hparams.num_train_images + 1) //
+        #         self.datamodule.hparams.train_batch_size
+        #     )
+        # )
 
         def warm_and_decay_lr_scheduler(step: int):
             warmup_steps = warmup_steps_pct * total_steps

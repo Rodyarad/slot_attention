@@ -1,4 +1,5 @@
 from typing import Tuple
+import math
 
 import torch
 from torch import nn
@@ -8,6 +9,7 @@ from utils import Tensor
 from utils import assert_shape
 from utils import build_grid
 from utils import conv_transpose_out_shape
+from einops import repeat, rearrange
 
 
 class SlotAttention(nn.Module):
@@ -95,34 +97,88 @@ class SlotAttention(nn.Module):
             assert_shape(slots.size(), (batch_size, self.num_slots, self.slot_size))
 
         return slots
-    
 
-class FocusedSlotAttention(nn.Module):
-    def __init__(self, in_features, num_iterations, num_slots, slot_size, mlp_hidden_size, epsilon=1e-8, focusing_factor=3):
+
+def softmax_kernel(data, *, projection_matrix, is_query, normalize_data=True, eps=1e-4, device = None):
+    b, h, *_ = data.shape
+    data_normalizer = (data.shape[-1] ** -0.25) if normalize_data else 1.
+    ratio = (projection_matrix.shape[0] ** -0.5)
+
+    projection = repeat(projection_matrix, 'j d -> b h j d', b = b, h = h)
+    projection = projection.type_as(data)
+    data_dash = torch.einsum('...id,...jd->...ij', (data_normalizer * data), projection)
+
+    diag_data = data ** 2
+    diag_data = torch.sum(diag_data, dim=-1)
+    diag_data = (diag_data / 2.0) * (data_normalizer ** 2)
+    diag_data = diag_data.unsqueeze(dim=-1)
+
+    if is_query:
+        data_dash = ratio * (
+            torch.exp(data_dash - diag_data -
+                    torch.amax(data_dash, dim=-1, keepdim=True).detach()) + eps)
+    else:
+        data_dash = ratio * (
+            torch.exp(data_dash - diag_data - torch.amax(data_dash, dim=(-1, -2), keepdim=True).detach()) + eps)
+
+    return data_dash.type_as(data)
+
+
+def orthogonal_matrix_chunk(cols, device = None):
+    unstructured_block = torch.randn((cols, cols), device = device)
+    q, r = torch.qr(unstructured_block.cpu(), some = True)
+    q, r = map(lambda t: t.to(device), (q, r))
+    return q.t()
+
+
+def gaussian_orthogonal_random_matrix(nb_rows, nb_columns, scaling = 0, device = None):
+    nb_full_blocks = int(nb_rows / nb_columns)
+    block_list = []
+
+    for _ in range(nb_full_blocks):
+        q = orthogonal_matrix_chunk(nb_columns, device = device)
+        block_list.append(q)
+
+    remaining_rows = nb_rows - nb_full_blocks * nb_columns
+    if remaining_rows > 0:
+        q = orthogonal_matrix_chunk(nb_columns, device = device)
+        block_list.append(q[:remaining_rows])
+
+    final_matrix = torch.cat(block_list)
+
+    if scaling == 0:
+        multiplier = torch.randn((nb_rows, nb_columns), device = device).norm(dim = 1)
+    elif scaling == 1:
+        multiplier = math.sqrt((float(nb_columns))) * torch.ones((nb_rows,), device = device)
+    else:
+        raise ValueError(f'Invalid scaling {scaling}')
+
+    return torch.diag(multiplier) @ final_matrix
+
+
+class FAVORPlusSlotAttention(nn.Module):
+    def __init__(self, in_features, num_iterations, num_slots, slot_size, mlp_hidden_size, num_random_features=256, epsilon=1e-8):
         super().__init__()
         self.in_features = in_features
         self.num_iterations = num_iterations
         self.num_slots = num_slots
-        self.slot_size = slot_size  # number of hidden layers in slot dimensions
+        self.slot_size = slot_size
         self.mlp_hidden_size = mlp_hidden_size
         self.epsilon = epsilon
-        self.focusing_factor = focusing_factor
+        self.num_random_features = num_random_features
 
         self.norm_inputs = nn.LayerNorm(self.in_features)
-        # I guess this is layer norm across each slot? should look into this
         self.norm_slots = nn.LayerNorm(self.slot_size)
         self.norm_mlp = nn.LayerNorm(self.slot_size)
 
-        # Linear maps for the attention module.
         self.project_q = nn.Linear(self.slot_size, self.slot_size, bias=False)
         self.project_k = nn.Linear(self.slot_size, self.slot_size, bias=False)
         self.project_v = nn.Linear(self.slot_size, self.slot_size, bias=False)
 
-        self.kernel_function = nn.RELU()
-        self.scale = nn.Parameter(torch.zeros(size=(1, 1, self.slot_size)))
+        projection_matrix = gaussian_orthogonal_random_matrix(nb_rows=num_random_features, nb_columns=slot_size, scaling=0)
+        self.register_buffer("random_features", projection_matrix)
+        self.random_features = F.normalize(self.random_features, dim=-1)
 
-
-        # Slot update functions.
         self.gru = nn.GRUCell(self.slot_size, self.slot_size)
         self.mlp = nn.Sequential(
             nn.Linear(self.slot_size, self.mlp_hidden_size),
@@ -140,47 +196,67 @@ class FocusedSlotAttention(nn.Module):
         )
 
     def forward(self, inputs: Tensor):
-        # `inputs` has shape [batch_size, num_inputs, inputs_size].
         batch_size, num_inputs, inputs_size = inputs.shape
-        inputs = self.norm_inputs(inputs)  # Apply layer norm to the input.
-        scale = nn.Softplus()(self.scale)
-        k = self.project_k(inputs)  # Shape: [batch_size, num_inputs, slot_size].
-        k = self.kernel_function(k) + 1e-6
-        k = k / scale
-        k = k ** self.focusing_factor
-        k_norm = k.norm(dim=-1, keepdim=True)
-        k = (k / k.norm(dim=-1, keepdim=True)) * k_norm
+        inputs = self.norm_inputs(inputs)
+        
+        k = self.project_k(inputs)  # Shape: [batch_size, num_inputs, slot_size]
         assert_shape(k.size(), (batch_size, num_inputs, self.slot_size))
-        v = self.project_v(inputs)  # Shape: [batch_size, num_inputs, slot_size].
+        
+        v = self.project_v(inputs)  # Shape: [batch_size, num_inputs, slot_size]
         assert_shape(v.size(), (batch_size, num_inputs, self.slot_size))
+        
+        # Apply random feature map to keys
+        # Add head dimension for consistency with multi-head attention
+        k = k.unsqueeze(1)  # Shape: [batch_size, 1, num_inputs, slot_size]
+        k_rf = softmax_kernel(k, is_query=False, projection_matrix=self.random_features, device=k.device) 
+        # k_rf shape: [batch_size, 1, num_inputs, num_random_features]
+        
+        # Sum over token dimension to get normalization factor
+        k_sum = k_rf.sum(dim=2)  # Shape: [batch_size, 1, num_random_features]
+        
+        # Add head dimension to values for consistency
+        v = v.unsqueeze(1)  # Shape: [batch_size, 1, num_inputs, slot_size]
 
-        # Initialize the slots. Shape: [batch_size, num_slots, slot_size].
         slots_init = torch.randn((batch_size, self.num_slots, self.slot_size))
         slots_init = slots_init.type_as(inputs)
         slots = self.slots_mu + self.slots_log_sigma.exp() * slots_init
 
-        # Multiple rounds of attention.
         for _ in range(self.num_iterations):
             slots_prev = slots
             slots = self.norm_slots(slots)
 
-            # Attention.
-            q = self.project_q(slots)  # Shape: [batch_size, num_slots, slot_size].
-            q = self.kernel_function(q) + 1e-6
-            q = q / scale
-            q_norm = q.norm(dim=-1, keepdim=True)
-            q = q ** self.focusing_factor
-            q = (q / q.norm(dim=-1, keepdim=True)) * q_norm
+            q = self.project_q(slots)  # Shape: [batch_size, num_slots, slot_size]
             assert_shape(q.size(), (batch_size, self.num_slots, self.slot_size))
+            
+            # Add head dimension for consistency
+            q = q.unsqueeze(1)  # Shape: [batch_size, 1, num_slots, slot_size]
+            q_rf = softmax_kernel(q, is_query=True, projection_matrix=self.random_features, device=q.device) 
+            # q_rf shape: [batch_size, 1, num_slots, num_random_features]
+            
+            # Calculate D_inv (normalization factor)
+            # q_rf: [batch_size, 1, num_slots, num_random_features]
+            # k_sum: [batch_size, 1, num_random_features]
+            D_inv = 1. / torch.einsum('bhsr,bhr->bhs', q_rf, k_sum)
+            # D_inv shape: [batch_size, 1, num_slots]
+            
+            # Calculate context based on key-value interaction
+            # k_rf: [batch_size, 1, num_inputs, num_random_features]
+            # v: [batch_size, 1, num_inputs, slot_size]
+            context = torch.einsum('bhir,bhid->bhrd', k_rf, v)
+            # context shape: [batch_size, 1, num_random_features, slot_size]
+            
+            # Apply attention to get slot updates
+            # context: [batch_size, 1, num_random_features, slot_size]
+            # q_rf: [batch_size, 1, num_slots, num_random_features]
+            # D_inv: [batch_size, 1, num_slots]
+            updates = torch.einsum('bhrd,bhsr,bhs->bhsd', context, q_rf, D_inv)
+            # updates shape: [batch_size, 1, num_slots, slot_size]
+            
+            updates = updates.squeeze(1)
+            assert_shape(updates.size(), (batch_size, self.num_slots, self.slot_size))
 
-            z = 1 / (q @ k.mean(dim=-2, keepdim=True).transpose(-2, -1) + 1e-6)
-            kv = (k.transpose(-2, -1) * (num_inputs ** -0.5)) @ (v * (num_inputs ** -0.5))
-            updates = q @ kv * z
-
-            # Slot update.
-            # GRU is expecting inputs of size (N,H) so flatten batch and slots dimension
             slots = self.gru(
-                updates.view(batch_size * self.num_slots, self.slot_size),
+                updates.reshape(batch_size * self.num_slots, self.slot_size),
                 slots_prev.view(batch_size * self.num_slots, self.slot_size),
             )
             slots = slots.view(batch_size, self.num_slots, self.slot_size)
@@ -296,14 +372,16 @@ class SlotAttentionModel(nn.Module):
                 slot_size=self.slot_size,
                 mlp_hidden_size=128,
             )
-        else:
-                self.slot_attention = FocusedSlotAttention(
+        elif self.vers == 'favor':
+            self.slot_attention = FAVORPlusSlotAttention(
                 in_features=self.out_features,
                 num_iterations=self.num_iterations,
                 num_slots=self.num_slots,
                 slot_size=self.slot_size,
                 mlp_hidden_size=128,
             )
+        else:
+            raise BaseException("Unknown slot attention")
 
 
     def forward(self, x):
