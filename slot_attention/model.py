@@ -211,9 +211,6 @@ class FAVORPlusSlotAttention(nn.Module):
         k_rf = softmax_kernel(k, is_query=False, projection_matrix=self.random_features, device=k.device) 
         # k_rf shape: [batch_size, 1, num_inputs, num_random_features]
         
-        # Sum over token dimension to get normalization factor
-        k_sum = k_rf.sum(dim=2)  # Shape: [batch_size, 1, num_random_features]
-        
         # Add head dimension to values for consistency
         v = v.unsqueeze(1)  # Shape: [batch_size, 1, num_inputs, slot_size]
 
@@ -233,23 +230,24 @@ class FAVORPlusSlotAttention(nn.Module):
             q_rf = softmax_kernel(q, is_query=True, projection_matrix=self.random_features, device=q.device) 
             # q_rf shape: [batch_size, 1, num_slots, num_random_features]
             
-            # Calculate D_inv (normalization factor)
-            # q_rf: [batch_size, 1, num_slots, num_random_features]
-            # k_sum: [batch_size, 1, num_random_features]
-            D_inv = 1. / torch.einsum('bhsr,bhr->bhs', q_rf, k_sum)
-            # D_inv shape: [batch_size, 1, num_slots]
-            
-            # Calculate context based on key-value interaction
+            # Calculate attention scores
             # k_rf: [batch_size, 1, num_inputs, num_random_features]
-            # v: [batch_size, 1, num_inputs, slot_size]
-            context = torch.einsum('bhir,bhid->bhrd', k_rf, v)
-            # context shape: [batch_size, 1, num_random_features, slot_size]
-            
-            # Apply attention to get slot updates
-            # context: [batch_size, 1, num_random_features, slot_size]
             # q_rf: [batch_size, 1, num_slots, num_random_features]
-            # D_inv: [batch_size, 1, num_slots]
-            updates = torch.einsum('bhrd,bhsr,bhs->bhsd', context, q_rf, D_inv)
+            # Compute attention scores for each input-slot pair
+            attn_scores = torch.einsum('bhir,bhsr->bhis', k_rf, q_rf)
+            # attn_scores shape: [batch_size, 1, num_inputs, num_slots]
+            
+            # Normalize slot-wise (across slots dimension) with added epsilon for stability
+            # This is critical for Slot Attention - each input feature gets distributed among slots
+            attn = attn_scores + self.epsilon
+            attn = attn / torch.sum(attn, dim=-1, keepdim=True)
+            # attn shape: [batch_size, 1, num_inputs, num_slots]
+            
+            # Transpose to get [batch_size, 1, num_slots, num_inputs]
+            attn = attn.transpose(-1, -2)
+            
+            # Weighted mean of inputs
+            updates = torch.einsum('bhsi,bhid->bhsd', attn, v)
             # updates shape: [batch_size, 1, num_slots, slot_size]
             
             updates = updates.squeeze(1)
