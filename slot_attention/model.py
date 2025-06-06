@@ -446,13 +446,17 @@ class FAVORPlusSlotAttention(nn.Module):
             # k_rf: [batch_size, 1, num_inputs, num_random_features]
             # q_rf: [batch_size, 1, num_slots, num_random_features]
             # Compute attention scores for each input-slot pair
+            attn_norm_factor = self.slot_size ** -0.5
             attn_scores = torch.einsum('bhir,bhsr->bhis', k_rf, q_rf)
             # attn_scores shape: [batch_size, 1, num_inputs, num_slots]
             
             # Normalize slot-wise (across slots dimension) with added epsilon for stability
             # This is critical for Slot Attention - each input feature gets distributed among slots
             attn = attn_scores + self.epsilon
-            attn = attn / torch.sum(attn, dim=-1, keepdim=True)
+            attn = attn / torch.sum(attn, dim=2, keepdim=True)
+
+            attn = attn + self.epsilon
+            attn = attn / torch.sum(attn, dim=1, keepdim=True)
             # attn shape: [batch_size, 1, num_inputs, num_slots]
             
             # Transpose to get [batch_size, 1, num_slots, num_inputs]
@@ -768,8 +772,8 @@ class SlotAttentionModel(nn.Module):
         loss = F.mse_loss(recon_combined, input)
         return {
             "loss": loss,
-            "recons": recons,
-            "masks": masks,
+            # "recons": recons,
+            # "masks": masks,
         }
 
 

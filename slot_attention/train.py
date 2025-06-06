@@ -12,6 +12,9 @@ from params import SlotAttentionParams
 from utils import ImageLogCallback
 from utils import rescale
 
+import os
+os.environ['CUDA_VISIBLE_DEVICES'] = '2'
+
 
 def main(params: Optional[SlotAttentionParams] = None):
     if params is None:

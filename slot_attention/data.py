@@ -10,8 +10,40 @@ from PIL import Image
 from torch.utils.data import DataLoader
 from torch.utils.data import Dataset
 from torchvision.transforms import transforms
+from multi_object_datasets_torch import ClevrWithMasks
 
-from utils import compact
+from utils import compact, rescale
+
+
+class FilteredDataset(Dataset):
+    def __init__(self, base_dataset, max_n_objects=5):
+        self.base = base_dataset
+        self.max_nonzeros = max_n_objects
+
+        self.to_pil = transforms.ToPILImage()
+        self.to_tensor = transforms.ToTensor()
+        self.clevr_transforms = transforms.Compose([
+            transforms.Lambda(rescale),  # rescale between -1 and 1
+            transforms.Resize((128, 128)),
+        ])
+
+        self.filtered_idxs = []
+        for i in range(len(self.base)):
+            vis = self.base[i]['visibility']
+            if (vis != 0).sum().item() <= max_n_objects:
+                self.filtered_idxs.append(i)
+                # break
+
+    def __len__(self):
+        return len(self.filtered_idxs)
+
+    def __getitem__(self, idx):
+        orig = self.base[self.filtered_idxs[idx]]
+        img = orig['image']
+        img = self.to_tensor(self.to_pil(img).convert("RGB"))
+        img = self.clevr_transforms(img)
+
+        return img
 
 
 class CLEVRDataset(Dataset):
@@ -77,18 +109,26 @@ class CLEVRDataModule(pl.LightningDataModule):
         self.train_dataset = None
         self.val_dataset = None
 
-        self.train_dataset = CLEVRDataset(
-            data_root=self.hparams.data_root,
-            max_num_images=self.hparams.num_train_images,
-            clevr_transforms=self.hparams.clevr_transforms,
-            split="train",
+        # self.train_dataset = CLEVRDataset(
+        #     data_root=self.hparams.data_root,
+        #     max_num_images=self.hparams.num_train_images,
+        #     clevr_transforms=self.hparams.clevr_transforms,
+        #     split="train",
+        #     max_n_objects=self.hparams.max_n_objects,
+        # )
+        # self.val_dataset = CLEVRDataset(
+        #     data_root=self.hparams.data_root,
+        #     max_num_images=self.hparams.num_val_images,
+        #     clevr_transforms=self.hparams.clevr_transforms,
+        #     split="val",
+        #     max_n_objects=self.hparams.max_n_objects,
+        # )
+        self.train_dataset = FilteredDataset(
+            ClevrWithMasks('datasets', split='train'),
             max_n_objects=self.hparams.max_n_objects,
         )
-        self.val_dataset = CLEVRDataset(
-            data_root=self.hparams.data_root,
-            max_num_images=self.hparams.num_val_images,
-            clevr_transforms=self.hparams.clevr_transforms,
-            split="val",
+        self.val_dataset = FilteredDataset(
+            ClevrWithMasks('datasets', split='test'),
             max_n_objects=self.hparams.max_n_objects,
         )
 
